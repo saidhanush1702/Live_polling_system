@@ -1,4 +1,3 @@
-// src/pages/Teacher.jsx
 import React, { useState, useEffect } from "react";
 import io from "socket.io-client";
 import axios from "axios";
@@ -14,8 +13,10 @@ export default function Teacher() {
   const [pastPolls, setPastPolls] = useState([]);
   const [showPastPolls, setShowPastPolls] = useState(false);
 
-  const [participants, setParticipants] = useState([]); // Live participants
-  const [showChat, setShowChat] = useState(false); // Toggle participants panel
+  const [participants, setParticipants] = useState([]); 
+  const [showChat, setShowChat] = useState(false); 
+
+  const [timeLeft, setTimeLeft] = useState(0);
 
   // Fetch past polls
   useEffect(() => {
@@ -40,6 +41,7 @@ export default function Teacher() {
     socket.on("newPoll", (poll) => {
       setActivePoll(poll);
       setResults(poll.options.map((opt) => ({ option: opt.text, count: opt.votes })));
+      setTimeLeft(poll.duration || 30);
     });
 
     socket.on("pollEnded", () => {
@@ -48,7 +50,7 @@ export default function Teacher() {
     });
 
     socket.on("updateParticipants", (data) => {
-      setParticipants(data); // Update live participants list
+      setParticipants(data); 
     });
 
     return () => {
@@ -59,8 +61,24 @@ export default function Teacher() {
     };
   }, []);
 
-  const addOption = () => setOptions([...options, ""]);
+  // Countdown timer for teacher
+  useEffect(() => {
+    if (!activePoll || timeLeft <= 0) return;
 
+    const timer = setTimeout(() => {
+      setTimeLeft(timeLeft - 1);
+
+      if (timeLeft - 1 <= 0) {
+        // Poll automatically ends after timer
+        setActivePoll(null);
+        fetchPastPolls();
+      }
+    }, 1000);
+
+    return () => clearTimeout(timer);
+  }, [timeLeft, activePoll]);
+
+  const addOption = () => setOptions([...options, ""]);
   const updateOption = (index, value) => {
     const newOptions = [...options];
     newOptions[index] = value;
@@ -75,12 +93,6 @@ export default function Teacher() {
     setQuestion("");
     setOptions(["", ""]);
     setDuration(30);
-  };
-
-  const endPoll = () => {
-    socket.emit("endPoll");
-    setActivePoll(null);
-    fetchPastPolls();
   };
 
   const kickStudent = (studentName) => {
@@ -113,6 +125,7 @@ export default function Teacher() {
             );
           })}
         </div>
+        <div className="mt-2 text-sm text-[#6E6E6E] font-medium">⏱ {timeLeft}s left</div>
       </div>
     );
   };
@@ -175,14 +188,6 @@ export default function Teacher() {
 
       {/* Active Poll */}
       {activePoll && renderPollResults(activePoll)}
-      {activePoll && (
-        <button
-          onClick={endPoll}
-          className="bg-[#7765DA] text-white px-4 py-2 rounded mb-6"
-        >
-          End Poll
-        </button>
-      )}
 
       {/* Toggle Past Polls */}
       <button
