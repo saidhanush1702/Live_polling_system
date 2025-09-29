@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import Teacher from "./Pages/Teacher";
-import Student from "./pages/Student";
+import Student from "./Pages/Student";
 
 export default function App() {
   const [role, setRole] = useState(null); // 'teacher' | 'student'

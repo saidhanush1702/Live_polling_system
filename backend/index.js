@@ -24,10 +24,10 @@ const io = new Server(server, {
 });
 
 // --- In-memory state ---
-let currentPoll = null; // active poll
+let currentPoll = null;
 const connectedStudents = new Map(); // socketId -> { name, answered }
 
-// --- Helper: format poll for frontend ---
+// --- Helper: format poll ---
 function pollToClient(pollDoc) {
   if (!pollDoc) return null;
   return {
@@ -40,16 +40,16 @@ function pollToClient(pollDoc) {
   };
 }
 
-/* =========================
-   Socket.io realtime logic
-   ========================= */
+// =========================
+// Socket.io logic
+// =========================
 io.on('connection', (socket) => {
   console.log('Socket connected:', socket.id);
 
   socket.on('join', ({ name, role }) => {
     if (role === 'student') {
       connectedStudents.set(socket.id, { name, answered: false });
-      io.emit('studentsUpdate', Array.from(connectedStudents.values()).map((s) => s.name));
+      io.emit('updateParticipants', Array.from(connectedStudents.values()).map((s) => s.name));
     } else if (role === 'teacher') {
       if (currentPoll) socket.emit('newPoll', pollToClient(currentPoll));
     }
@@ -81,7 +81,6 @@ io.on('connection', (socket) => {
 
       io.emit('newPoll', pollToClient(poll));
 
-      // auto-end poll
       setTimeout(async () => {
         try {
           const p = await Poll.findById(poll._id);
@@ -132,33 +131,69 @@ io.on('connection', (socket) => {
     }
   });
 
-  socket.on('removeStudent', (socketIdToRemove) => {
-    if (connectedStudents.has(socketIdToRemove)) {
-      connectedStudents.delete(socketIdToRemove);
-      io.to(socketIdToRemove).emit('kicked');
-      io.emit('studentsUpdate', Array.from(connectedStudents.values()).map((s) => s.name));
+  socket.on('kickStudent', (data) => {
+    const { studentName } = data;
+    const entry = Array.from(connectedStudents.entries()).find(([id, s]) => s.name === studentName);
+    if (entry) {
+      const [sockId] = entry;
+      connectedStudents.delete(sockId);
+      io.to(sockId).emit('kicked');
+      io.emit('updateParticipants', Array.from(connectedStudents.values()).map((s) => s.name));
     }
   });
 
   socket.on('disconnect', () => {
     connectedStudents.delete(socket.id);
-    io.emit('studentsUpdate', Array.from(connectedStudents.values()).map((s) => s.name));
+    io.emit('updateParticipants', Array.from(connectedStudents.values()).map((s) => s.name));
   });
 });
 
-/* ================
-   REST API routes
-   ================ */
+// ===================
+// REST API
+// ===================
 
-// Create new poll (also useful for Postman)
+// Get all polls
+app.get('/api/polls', async (req, res) => {
+  try {
+    const polls = await Poll.find().sort({ createdAt: -1 });
+    res.json(polls.map(pollToClient));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get latest poll
+app.get('/api/polls/latest', async (req, res) => {
+  try {
+    const poll = await Poll.findOne().sort({ createdAt: -1 });
+    if (!poll) return res.json(null);
+    res.json(pollToClient(poll));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Get poll by id
+app.get('/api/polls/:id', async (req, res) => {
+  try {
+    const poll = await Poll.findById(req.params.id);
+    if (!poll) return res.status(404).json({ error: 'Not Found' });
+    res.json(pollToClient(poll));
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
+// Create poll via REST
 app.post('/api/polls', async (req, res) => {
   try {
     const { question, options, duration = 60 } = req.body;
     if (!question || !options || !Array.isArray(options) || options.length < 2) {
       return res.status(400).json({ error: 'Poll must have a question and at least 2 options' });
     }
-
-    // Prevent creating if active poll exists
     if (currentPoll && !currentPoll.ended) {
       return res.status(409).json({ error: 'An active poll is already running' });
     }
@@ -174,71 +209,30 @@ app.post('/api/polls', async (req, res) => {
     await poll.save();
     currentPoll = poll;
 
-    // reset answered flags
     for (const student of connectedStudents.values()) student.answered = false;
 
     io.emit('newPoll', pollToClient(poll));
 
-    // auto-end poll
     setTimeout(async () => {
-      try {
-        const p = await Poll.findById(poll._id);
-        if (!p || p.ended) return;
-        p.ended = true;
-        p.endedAt = new Date();
-        await p.save();
-        currentPoll = null;
-        io.emit('pollEnded', pollToClient(p));
-      } catch (err) {
-        console.error('Auto-end error (POST):', err);
-      }
+      const p = await Poll.findById(poll._id);
+      if (!p || p.ended) return;
+      p.ended = true;
+      p.endedAt = new Date();
+      await p.save();
+      currentPoll = null;
+      io.emit('pollEnded', pollToClient(p));
     }, duration * 1000);
 
     res.status(201).json(pollToClient(poll));
   } catch (err) {
-    console.error('POST /api/polls error:', err);
+    console.error(err);
     res.status(500).json({ error: 'Server error creating poll' });
   }
 });
 
-// Get all polls (past)
-app.get('/api/polls', async (req, res) => {
-  try {
-    const polls = await Poll.find().sort({ createdAt: -1 });
-    res.json(polls.map(pollToClient));
-  } catch (err) {
-    console.error('GET /api/polls error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get by id
-app.get('/api/polls/:id', async (req, res) => {
-  try {
-    const poll = await Poll.findById(req.params.id);
-    if (!poll) return res.status(404).json({ error: 'Not Found' });
-    res.json(pollToClient(poll));
-  } catch (err) {
-    console.error('GET /api/polls/:id error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-// Get latest poll (safe)
-app.get('/api/polls/latest', async (req, res) => {
-  try {
-    const poll = await Poll.findOne().sort({ createdAt: -1 });
-    if (!poll) return res.json(null);
-    res.json(pollToClient(poll));
-  } catch (err) {
-    console.error('GET /api/polls/latest error:', err);
-    res.status(500).json({ error: 'Server error' });
-  }
-});
-
-/* ====================
-   Mongo + server start
-   ==================== */
+// ===================
+// Mongo + server start
+// ===================
 mongoose
   .connect(process.env.MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
   .then(() => {
